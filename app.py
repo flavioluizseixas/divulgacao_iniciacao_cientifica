@@ -513,7 +513,7 @@ def abrir_modal_projeto(row: pd.Series):
                 st.markdown(f"**{label}:** {v}")
 
         st.divider()
-        kv("Coordenador", row.get("coordenador", ""))
+        kv("Coordenadores", row.get("coordenador", ""))
         kv("Laboratório", row.get("laboratorio", ""))
         kv("Período", row.get("periodo", ""))
         kv("Vagas", row.get("vagas", ""))
