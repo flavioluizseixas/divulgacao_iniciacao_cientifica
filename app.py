@@ -2,15 +2,22 @@
 # Portal público de Projetos de Iniciação Científica e Extensão (UFF/PROEX)
 # Compatível com Streamlit 1.53+
 #
-# Como rodar:
+# Requisitos:
 #   pip install -U streamlit pandas openpyxl
-#   streamlit run app.py
+#   (opcional p/ thumbnails) pip install pillow
 #
-# Requer: modelo_projetos_ic_extensao_v2.xlsx na mesma pasta (ou ajuste ARQ_EXCEL)
+# Estrutura:
+#   app.py
+#   /data/modelo_projetos_ic_extensao.xlsx
+#   /imgs/p_0001.png, p_0002.png, p_0003.jpg, ...
+#   /imgs/_default.png  (fallback recomendado)
+#   /assets/uff_proex_logo.png (opcional)
 
 import os
 import base64
 import html as html_lib
+from typing import Optional, Tuple
+
 import pandas as pd
 import streamlit as st
 
@@ -19,10 +26,19 @@ import streamlit as st
 # =========================
 st.set_page_config(page_title="Projetos IC & Extensão — UFF/PROEX", layout="wide")
 
-ARQ_EXCEL = "modelo_projetos_ic_extensao_v2.xlsx"
-ABA = "projetos"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-LOGO_PATH = "assets/uff_proex_logo.png"  # opcional
+ARQ_EXCEL = os.environ.get(
+    "ARQ_EXCEL",
+    os.path.join(BASE_DIR, "data", "modelo_projetos_ic_extensao.xlsx")
+)
+ABA = os.environ.get("ABA_EXCEL", "projetos")
+
+LOGO_PATH = os.path.join(BASE_DIR, "assets", "uff_proex_logo.png")  # opcional
+
+IMG_DIR = os.path.join(BASE_DIR, "imgs")
+THUMB_DIR = os.path.join(IMG_DIR, "_thumbs")
+DEFAULT_IMG = os.path.join(IMG_DIR, "_default.png")  # fallback (recomendado)
 
 BRAND_GREEN = "#1F6F4A"
 BRAND_GREEN_DARK = "#15553A"
@@ -30,6 +46,9 @@ BG = "#F6F7F8"
 
 CARD_IMG_HEIGHT = 165
 GRID_COLS = 3
+
+# Proporção padrão para thumbnails: 16:9 (boa p/ cards)
+THUMB_SIZE = (1200, 675)  # (w, h)
 
 # =========================
 # CSS
@@ -94,7 +113,6 @@ html, body, [class*="css"] {{
   margin-top: 4px;
 }}
 
-/* Container com border=True (usado nos filtros) */
 div[data-testid="stVerticalBlockBorderWrapper"] {{
   background: white !important;
   border: 1px solid rgba(0,0,0,0.06) !important;
@@ -104,37 +122,16 @@ div[data-testid="stVerticalBlockBorderWrapper"] {{
   margin-bottom: 12px !important;
 }}
 
-/* Chips */
-.chip-btn button,
-.chip-btn-active button {{
-  border-radius: 999px !important;
-  height: 36px !important;
-  padding: 0 16px !important;
-  border: 1px solid rgba(0,0,0,0.12) !important;
-  background: #fff !important;
-  font-size: 0.90rem !important;
+/* Pills: aumentar tamanho e legibilidade */
+div[data-testid="stPills"] button {{
+  padding: 10px 16px !important;
+  font-size: 0.95rem !important;
   font-weight: 950 !important;
-  line-height: 36px !important;
-  box-shadow: none !important;
-  margin: 0 !important;
-}}
-.chip-btn button {{
-  color: rgba(0,0,0,0.78) !important;
-}}
-.chip-btn button:hover {{
-  background: rgba(0,0,0,0.03) !important;
-}}
-.chip-btn-active button {{
-  background: {BRAND_GREEN} !important;
-  color: #fff !important;
-  border-color: {BRAND_GREEN} !important;
-}}
-.chip-btn-active button:hover {{
-  background: {BRAND_GREEN_DARK} !important;
-  border-color: {BRAND_GREEN_DARK} !important;
+  border-radius: 999px !important;
+  white-space: normal !important;
+  line-height: 1.15 !important;
 }}
 
-/* Card HTML */
 .cardwrap {{
   position: relative;
   margin-bottom: 14px;
@@ -162,6 +159,7 @@ div[data-testid="stVerticalBlockBorderWrapper"] {{
   font-size:14px;
   min-height:44px;
 }}
+
 .badges {{
   display:flex;
   gap:8px;
@@ -170,12 +168,17 @@ div[data-testid="stVerticalBlockBorderWrapper"] {{
   margin-bottom:10px;
 }}
 .badge {{
-  display:inline-block;
-  padding:4px 10px;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  padding: 6px 14px;
   border-radius:999px;
-  font-size:12px;
+  font-size:13px;
   font-weight:950;
   border:1px solid rgba(0,0,0,0.08);
+  max-width: 100%;
+  white-space: normal;
+  line-height: 1.15;
 }}
 .b-cat {{ background:#fff7ed; color:#9a3412; }}
 .b-periodo {{ background:#f5f3ff; color:#5b21b6; }}
@@ -197,26 +200,6 @@ div[data-testid="stVerticalBlockBorderWrapper"] {{
   height:100%;
   object-fit:cover;
   display:block;
-}}
-
-/* Botão invisível por cima do card (para clique abrir modal) */
-.cardwrap .open-overlay {{
-  position: absolute;
-  inset: 0;
-  z-index: 50;
-}}
-.cardwrap .open-overlay button {{
-  width: 100% !important;
-  height: 100% !important;
-  opacity: 0 !important;
-  border: none !important;
-  padding: 0 !important;
-  margin: 0 !important;
-}}
-.cardwrap .open-overlay button:focus {{
-  outline: 3px solid rgba(31, 111, 74, 0.25) !important;
-  outline-offset: 2px !important;
-  opacity: 0.0001 !important;
 }}
 </style>
 """,
@@ -244,88 +227,135 @@ def _badge_status_insc(status: str) -> str:
     s = (status or "").strip().lower()
     return "b-abertas" if "abert" in s else "b-encerradas"
 
-def _resolve_image_path(img_value: str) -> str:
-    v = _safe_str(img_value)
+def _ensure_dirs():
+    os.makedirs(IMG_DIR, exist_ok=True)
+    os.makedirs(THUMB_DIR, exist_ok=True)
+
+def _resolve_local_image_from_value(value: str) -> str:
+    """
+    Resolve path local a partir de um valor (pode vir como 'imgs/p_0002.png' ou 'p_0002.png').
+    Não resolve URLs (o pedido aqui é local).
+    """
+    v = _safe_str(value)
     if not v:
         return ""
-    if v.startswith("http://") or v.startswith("https://"):
-        return v
-    if os.path.isabs(v) and os.path.exists(v):
-        return v
-    rel = os.path.join(os.getcwd(), v)
-    if os.path.exists(rel):
-        return rel
+    # Se veio com imgs/...
+    if v.startswith("imgs/") or v.startswith("imgs\\"):
+        p = os.path.join(BASE_DIR, v.replace("/", os.sep).replace("\\", os.sep))
+        return p if os.path.exists(p) else ""
+    # Se veio só o nome do arquivo
+    p = os.path.join(IMG_DIR, v)
+    return p if os.path.exists(p) else ""
+
+def _auto_map_image_by_id(proj_id: str) -> str:
+    """
+    Busca imgs/<id>.(png|jpg|jpeg|webp)
+    """
+    pid = _safe_str(proj_id)
+    if not pid:
+        return ""
+    exts = [".png", ".jpg", ".jpeg", ".webp"]
+    for ext in exts:
+        p = os.path.join(IMG_DIR, f"{pid}{ext}")
+        if os.path.exists(p):
+            return p
     return ""
 
-def _image_to_data_uri(path_or_url: str) -> str:
-    if not path_or_url:
+def _pick_image_path(row: pd.Series) -> str:
+    """
+    Prioridade:
+      1) coluna imagem (local) se existir
+      2) auto-map por id
+      3) fallback DEFAULT_IMG (se existir)
+      4) vazio (vai renderizar placeholder)
+    """
+    # 1) imagem informada
+    p = _resolve_local_image_from_value(row.get("imagem", ""))
+    if p:
+        return p
+
+    # 2) auto-map pelo id
+    p = _auto_map_image_by_id(row.get("id", ""))
+    if p:
+        return p
+
+    # 3) fallback
+    if os.path.exists(DEFAULT_IMG):
+        return DEFAULT_IMG
+
+    return ""
+
+def _image_to_data_uri(path: str) -> str:
+    if not path or not os.path.exists(path):
         return ""
-    if path_or_url.startswith("http://") or path_or_url.startswith("https://"):
-        return path_or_url
-    if not os.path.exists(path_or_url):
-        return ""
-    ext = os.path.splitext(path_or_url)[1].lower().replace(".", "")
+    ext = os.path.splitext(path)[1].lower().replace(".", "")
     if ext not in ("png", "jpg", "jpeg", "webp"):
         ext = "png"
-    with open(path_or_url, "rb") as f:
+    with open(path, "rb") as f:
         b64 = base64.b64encode(f.read()).decode("utf-8")
     mime = "image/jpeg" if ext in ("jpg", "jpeg") else f"image/{ext}"
     return f"data:{mime};base64,{b64}"
 
+def _thumb_path_for(src_path: str, size: Tuple[int, int]) -> str:
+    """
+    Thumb nomeado por arquivo + mtime + tamanho para evitar reprocessamento.
+    """
+    if not src_path:
+        return ""
+    try:
+        mtime = int(os.path.getmtime(src_path))
+    except OSError:
+        mtime = 0
+    base = os.path.basename(src_path)
+    name, ext = os.path.splitext(base)
+    w, h = size
+    return os.path.join(THUMB_DIR, f"{name}__{mtime}__{w}x{h}.jpg")
+
 @st.cache_data(show_spinner=False)
-def carregar_projetos(path: str, sheet: str) -> pd.DataFrame:
-    df = pd.read_excel(path, sheet_name=sheet).fillna("")
-    expected = [
-        "id","titulo","resumo","descricao","tipo","categoria","palavras_chave",
-        "status_projeto","status_inscricoes","periodo","imagem",
-        "coordenador","laboratorio","vagas","requisitos","carga_horaria","local",
-        "link_edital","contato_email","observacoes"
-    ]
-    for c in expected:
-        if c not in df.columns:
-            df[c] = ""
-        df[c] = df[c].astype(str).str.strip()
-    df = df[df["titulo"] != ""].copy()
-    return df
+def _make_thumbnail(src_path: str, size: Tuple[int, int]) -> str:
+    """
+    Gera thumbnail com crop central para manter proporção fixa.
+    Se Pillow não existir, retorna src_path.
+    """
+    if not src_path or not os.path.exists(src_path):
+        return ""
 
-def aplicar_busca(df: pd.DataFrame, q: str) -> pd.DataFrame:
-    q = (q or "").strip().lower()
-    if not q:
-        return df
-    def contains(col):
-        return df[col].str.lower().str.contains(q, na=False)
-    return df[
-        contains("titulo") |
-        contains("resumo") |
-        contains("descricao") |
-        contains("palavras_chave") |
-        contains("coordenador") |
-        contains("laboratorio")
-    ]
+    dst = _thumb_path_for(src_path, size)
+    if dst and os.path.exists(dst):
+        return dst
 
-def counts_por_categoria(df: pd.DataFrame) -> dict:
-    return df["categoria"].replace("", "Sem categoria").value_counts().to_dict()
+    try:
+        from PIL import Image, ImageOps  # type: ignore
+    except Exception:
+        # Sem pillow: não gera thumb
+        return src_path
 
-def kpis(df: pd.DataFrame) -> dict:
-    total = len(df)
-    ativos = (df["status_projeto"].str.strip().str.lower() != "encerrado").sum()
-    abertas = (df["status_inscricoes"].str.strip().str.lower() == "abertas").sum()
-    encerrados = (df["status_projeto"].str.strip().str.lower() == "encerrado").sum()
-    return {"total": int(total), "ativos": int(ativos), "abertas": int(abertas), "encerrados": int(encerrados)}
-
-def close_modal():
-    st.session_state["open_id"] = ""
+    try:
+        im = Image.open(src_path).convert("RGB")
+        # Crop central para proporção size
+        thumb = ImageOps.fit(im, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
+        os.makedirs(THUMB_DIR, exist_ok=True)
+        thumb.save(dst, format="JPEG", quality=88, optimize=True)
+        return dst
+    except Exception:
+        return src_path
 
 def render_card_html(row: pd.Series) -> str:
-    titulo = _escape(_safe_str(row["titulo"]))
-    resumo = _escape(_safe_str(row["resumo"]))
+    titulo = _escape(_safe_str(row["titulo_curto"]))
+    resumo = _escape(_safe_str(row["resumo_curto"]))
+
     categoria = _escape(_safe_str(row["categoria"]) or "Sem categoria")
     tipo = _escape(_safe_str(row["tipo"]))
     periodo = _escape(_safe_str(row.get("periodo", "")))
     st_proj = _escape(_safe_str(row["status_projeto"]))
     st_ins = _escape(_safe_str(row["status_inscricoes"]))
 
-    img_src = _image_to_data_uri(_resolve_image_path(row["imagem"]))
+    img_path = _pick_image_path(row)
+    # thumbnails padronizadas
+    if img_path:
+        img_path = _make_thumbnail(img_path, THUMB_SIZE)
+
+    img_src = _image_to_data_uri(img_path)
     badge_proj = _badge_status_projeto(st_proj)
     badge_ins = _badge_status_insc(st_ins)
     periodo_html = f'<span class="badge b-periodo">{periodo}</span>' if periodo else ""
@@ -353,16 +383,95 @@ def render_card_html(row: pd.Series) -> str:
     """
 
 # =========================
-# Dialog (Streamlit 1.53)
+# Data
 # =========================
-def abrir_modal_projeto(row: pd.Series):
-    titulo = _safe_str(row["titulo"])
-    img = _resolve_image_path(row["imagem"])
+@st.cache_data(show_spinner=False, ttl=5)
+def carregar_projetos(path: str, sheet: str) -> pd.DataFrame:
+    df = pd.read_excel(path, sheet_name=sheet).fillna("")
 
-    @st.dialog(titulo, width="large")
+    # cria colunas esperadas (evita KeyError como 'titulo')
+    expected = [
+        "id",
+        # novos
+        "titulo_curto", "resumo_curto",
+        "titulo_expandido", "resumo_expandido", "perfil",
+        # antigos (fallback)
+        "titulo", "resumo", "descricao",
+        # metadados
+        "tipo", "categoria", "palavras_chave",
+        "status_projeto", "status_inscricoes", "periodo", "imagem",
+        "coordenador", "laboratorio", "vagas", "requisitos", "carga_horaria", "local",
+        "link_edital", "contato_email", "observacoes"
+    ]
+    for c in expected:
+        if c not in df.columns:
+            df[c] = ""
+        df[c] = df[c].astype(str).str.strip()
+
+    # Fallbacks robustos (se não existir 'titulo', ele já foi criado acima)
+    df["titulo_curto"] = df["titulo_curto"].where(df["titulo_curto"] != "", df["titulo"])
+    df["resumo_curto"] = df["resumo_curto"].where(df["resumo_curto"] != "", df["resumo"])
+    df["titulo_expandido"] = df["titulo_expandido"].where(df["titulo_expandido"] != "", df["titulo"])
+
+    # resumo_expandido: novo -> descricao -> resumo
+    df["resumo_expandido"] = df["resumo_expandido"].where(
+        df["resumo_expandido"] != "",
+        df["descricao"].where(df["descricao"] != "", df["resumo"])
+    )
+
+    # Remove linhas sem título curto
+    df = df[df["titulo_curto"] != ""].copy()
+
+    # Garantir id
+    df["id"] = df["id"].where(df["id"] != "", None)
+    df["id"] = df["id"].fillna(pd.Series([f"p_{i+1:04d}" for i in range(len(df))], index=df.index))
+
+    return df
+
+def aplicar_busca(df: pd.DataFrame, q: str) -> pd.DataFrame:
+    q = (q or "").strip().lower()
+    if not q:
+        return df
+
+    def contains(col):
+        return df[col].str.lower().str.contains(q, na=False)
+
+    return df[
+        contains("titulo_curto") |
+        contains("titulo_expandido") |
+        contains("resumo_curto") |
+        contains("resumo_expandido") |
+        contains("perfil") |
+        contains("palavras_chave") |
+        contains("coordenador") |
+        contains("laboratorio")
+    ]
+
+def counts_por_categoria(df: pd.DataFrame) -> dict:
+    return df["categoria"].replace("", "Sem categoria").value_counts().to_dict()
+
+def kpis(df: pd.DataFrame) -> dict:
+    total = len(df)
+    ativos = (df["status_projeto"].str.strip().str.lower() != "encerrado").sum()
+    abertas = (df["status_inscricoes"].str.strip().str.lower() == "abertas").sum()
+    encerrados = (df["status_projeto"].str.strip().str.lower() == "encerrado").sum()
+    return {"total": int(total), "ativos": int(ativos), "abertas": int(abertas), "encerrados": int(encerrados)}
+
+# =========================
+# Modal
+# =========================
+def close_modal():
+    st.session_state["open_id"] = ""
+
+def abrir_modal_projeto(row: pd.Series):
+    titulo_modal = _safe_str(row.get("titulo_expandido", "")) or _safe_str(row.get("titulo_curto", "")) or "Detalhes"
+
+    img_path = _pick_image_path(row)
+    # Para o modal pode usar a original (ou a thumb, tanto faz)
+    @st.dialog(titulo_modal, width="large")
     def _modal():
-        if img:
-            st.image(img, use_container_width=True)
+        if img_path and os.path.exists(img_path):
+            st.image(img_path, use_container_width=True)
 
         categoria = _safe_str(row["categoria"]) or "Sem categoria"
         tipo = _safe_str(row["tipo"])
@@ -384,8 +493,19 @@ def abrir_modal_projeto(row: pd.Series):
         """
         st.markdown(badges_html, unsafe_allow_html=True)
 
-        st.subheader("Descrição")
-        st.write(_safe_str(row.get("descricao", "")))
+        tit_exp = _safe_str(row.get("titulo_expandido", ""))
+        if tit_exp:
+            st.markdown(f"### {html_lib.escape(tit_exp)}", unsafe_allow_html=True)
+
+        resumo_exp = _safe_str(row.get("resumo_expandido", ""))
+        if resumo_exp:
+            st.subheader("Resumo")
+            st.markdown(resumo_exp, unsafe_allow_html=True)
+
+        perfil = _safe_str(row.get("perfil", ""))
+        if perfil:
+            st.subheader("Perfil")
+            st.markdown(perfil, unsafe_allow_html=True)
 
         def kv(label, value):
             v = _safe_str(value)
@@ -418,15 +538,21 @@ def abrir_modal_projeto(row: pd.Series):
 # =========================
 # APP
 # =========================
+_ensure_dirs()
+
 if not os.path.exists(ARQ_EXCEL):
-    st.error(f"Arquivo não encontrado: {ARQ_EXCEL}. Coloque o Excel junto do app.py ou ajuste ARQ_EXCEL.")
+    st.error(
+        "Arquivo não encontrado.\n\n"
+        f"**ARQ_EXCEL:** `{ARQ_EXCEL}`\n\n"
+        "Verifique se existe:\n"
+        f"- `{os.path.join(BASE_DIR, 'data', os.path.basename(ARQ_EXCEL))}`\n"
+        "Ou defina a variável de ambiente `ARQ_EXCEL` com o caminho correto."
+    )
     st.stop()
 
 df = carregar_projetos(ARQ_EXCEL, ABA)
 
 # Session defaults
-if "categoria_chip" not in st.session_state:
-    st.session_state["categoria_chip"] = "Todas"
 if "open_id" not in st.session_state:
     st.session_state["open_id"] = ""
 
@@ -448,7 +574,7 @@ with hl:
         <div class="header">
           <div>
             <h1>Projetos de Iniciação Científica e Extensão</h1>
-            <p>Portal público para conhecer projetos, acompanhar status e ver inscrições abertas. Clique em um card para detalhes.</p>
+            <p>Portal para conhecer projetos de iniciação científica e extensão, acompanhar status e ver inscrições abertas. Clique em um card para detalhes.</p>
           </div>
         </div>
         """,
@@ -460,7 +586,7 @@ with hr:
     else:
         st.caption("Logo opcional: `assets/uff_proex_logo.png`.")
 
-# FILTROS (mudou = fecha modal)
+# FILTROS
 with st.container(border=True):
     c1, c2, c3, c4 = st.columns([3.2, 1.1, 1.6, 1.8])
 
@@ -498,7 +624,7 @@ with st.container(border=True):
             st.session_state["f_status_insc"] = "Todos"
         st.selectbox("Status das inscrições", sinsc_opts, key="f_status_insc", on_change=close_modal)
 
-# Aplicação dos filtros
+# Aplica filtros
 df_base = aplicar_busca(df, st.session_state["busca"])
 if st.session_state["f_tipo"] != "Todos":
     df_base = df_base[df_base["tipo"] == st.session_state["f_tipo"]]
@@ -521,39 +647,33 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Chips de categoria
+# Categorias com pills (não esmagam texto)
 cat_counts = counts_por_categoria(df_base)
 total = len(df_base)
+cats_sorted = sorted(cat_counts.items(), key=lambda x: (-x[1], x[0]))
+cat_options = [f"Todas ({total})"] + [f"{cat} ({cnt})" for cat, cnt in cats_sorted]
 
 st.markdown("**Categorias**")
-chip_cols = st.columns(9)
+sel = st.pills(
+    label="Categorias",
+    options=cat_options,
+    default=st.session_state.get("categoria_chip_ui", f"Todas ({total})"),
+    label_visibility="collapsed",
+)
+if sel is None:
+    sel = f"Todas ({total})"
 
-def _chip_key(s: str) -> str:
-    return "".join(ch if ch.isalnum() else "_" for ch in s)
+if st.session_state.get("categoria_chip_ui", "") != sel:
+    st.session_state["categoria_chip_ui"] = sel
+    close_modal()
+    st.rerun()
 
-with chip_cols[0]:
-    active = st.session_state["categoria_chip"] == "Todas"
-    st.markdown(f'<div class="{"chip-btn-active" if active else "chip-btn"}">', unsafe_allow_html=True)
-    if st.button(f"Todas ({total})", key="chip_todas"):
-        st.session_state["categoria_chip"] = "Todas"
-        close_modal()
-        st.rerun()
-    st.markdown("</div>", unsafe_allow_html=True)
+if sel.startswith("Todas"):
+    sel_cat = "Todas"
+else:
+    sel_cat = sel.rsplit(" (", 1)[0].strip()
 
-cats_sorted = sorted(cat_counts.items(), key=lambda x: (-x[1], x[0]))
-for i, (cat, cnt) in enumerate(cats_sorted, start=1):
-    with chip_cols[i % len(chip_cols)]:
-        active = st.session_state["categoria_chip"] == cat
-        st.markdown(f'<div class="{"chip-btn-active" if active else "chip-btn"}">', unsafe_allow_html=True)
-        if st.button(f"{cat} ({cnt})", key=f"chip_{_chip_key(cat)}"):
-            st.session_state["categoria_chip"] = cat
-            close_modal()
-            st.rerun()
-        st.markdown("</div>", unsafe_allow_html=True)
-
-# Filtro por categoria (chip)
 df_f = df_base.copy()
-sel_cat = st.session_state["categoria_chip"]
 if sel_cat != "Todas":
     if sel_cat == "Sem categoria":
         df_f = df_f[df_f["categoria"].replace("", "Sem categoria") == "Sem categoria"]
@@ -576,22 +696,14 @@ if open_id:
     else:
         close_modal()
 
-# Grid de cards + overlay button que abre modal
+# Grid de cards
 cols = st.columns(GRID_COLS, gap="large")
 for idx, (_, row) in enumerate(df_f.iterrows()):
     with cols[idx % GRID_COLS]:
         proj_id = _safe_str(row["id"]) or f"row_{idx}"
 
-        # Card HTML
         st.markdown(render_card_html(row), unsafe_allow_html=True)
 
-        # Botão invisível (overlay) para abrir modal sem navegação/aba
-        # A chave precisa ser única por card
-        #st.markdown('<div class="cardwrap"><div class="open-overlay">', unsafe_allow_html=True)
-        #clicked = st.button("Abrir", key=f"open_{proj_id}")
-        #st.markdown("</div></div>", unsafe_allow_html=True)
-
-        # Botão "Abrir" centralizado abaixo do card
         b1, b2, b3 = st.columns([1, 1, 1])
         with b2:
             clicked = st.button("Abrir", key=f"open_{proj_id}", use_container_width=True)
