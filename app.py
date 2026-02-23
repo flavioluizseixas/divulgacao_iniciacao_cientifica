@@ -30,7 +30,7 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 ARQ_EXCEL = os.environ.get(
     "ARQ_EXCEL",
-    os.path.join(BASE_DIR, "data", "modelo_projetos_ic_extensao.xlsx")
+    os.path.join(BASE_DIR, "data", "modelo_projetos_ic_extensao.xlsx"),
 )
 ABA = os.environ.get("ABA_EXCEL", "projetos")
 
@@ -207,6 +207,15 @@ div[data-testid="stPills"] button {{
 )
 
 # =========================
+# Query Params (Deep Link) — APENAS LEITURA
+# =========================
+def _qp_get_one(key: str) -> str:
+    v = st.query_params.get(key, "")
+    if isinstance(v, list):
+        return v[0] if v else ""
+    return str(v or "")
+
+# =========================
 # Helpers
 # =========================
 def _safe_str(x) -> str:
@@ -214,6 +223,13 @@ def _safe_str(x) -> str:
 
 def _escape(s: str) -> str:
     return html_lib.escape(s or "")
+
+def _normalize_id(x: str) -> str:
+    s = _safe_str(x).strip()
+    # Excel numérico virando float: "p_0002.0"
+    if s.endswith(".0"):
+        s = s[:-2]
+    return s.strip().lower()
 
 def _badge_status_projeto(status: str) -> str:
     s = (status or "").strip().lower()
@@ -232,25 +248,16 @@ def _ensure_dirs():
     os.makedirs(THUMB_DIR, exist_ok=True)
 
 def _resolve_local_image_from_value(value: str) -> str:
-    """
-    Resolve path local a partir de um valor (pode vir como 'imgs/p_0002.png' ou 'p_0002.png').
-    Não resolve URLs (o pedido aqui é local).
-    """
     v = _safe_str(value)
     if not v:
         return ""
-    # Se veio com imgs/...
     if v.startswith("imgs/") or v.startswith("imgs\\"):
         p = os.path.join(BASE_DIR, v.replace("/", os.sep).replace("\\", os.sep))
         return p if os.path.exists(p) else ""
-    # Se veio só o nome do arquivo
     p = os.path.join(IMG_DIR, v)
     return p if os.path.exists(p) else ""
 
 def _auto_map_image_by_id(proj_id: str) -> str:
-    """
-    Busca imgs/<id>.(png|jpg|jpeg|webp)
-    """
     pid = _safe_str(proj_id)
     if not pid:
         return ""
@@ -262,27 +269,14 @@ def _auto_map_image_by_id(proj_id: str) -> str:
     return ""
 
 def _pick_image_path(row: pd.Series) -> str:
-    """
-    Prioridade:
-      1) coluna imagem (local) se existir
-      2) auto-map por id
-      3) fallback DEFAULT_IMG (se existir)
-      4) vazio (vai renderizar placeholder)
-    """
-    # 1) imagem informada
     p = _resolve_local_image_from_value(row.get("imagem", ""))
     if p:
         return p
-
-    # 2) auto-map pelo id
     p = _auto_map_image_by_id(row.get("id", ""))
     if p:
         return p
-
-    # 3) fallback
     if os.path.exists(DEFAULT_IMG):
         return DEFAULT_IMG
-
     return ""
 
 def _image_to_data_uri(path: str) -> str:
@@ -297,9 +291,6 @@ def _image_to_data_uri(path: str) -> str:
     return f"data:{mime};base64,{b64}"
 
 def _thumb_path_for(src_path: str, size: Tuple[int, int]) -> str:
-    """
-    Thumb nomeado por arquivo + mtime + tamanho para evitar reprocessamento.
-    """
     if not src_path:
         return ""
     try:
@@ -307,32 +298,23 @@ def _thumb_path_for(src_path: str, size: Tuple[int, int]) -> str:
     except OSError:
         mtime = 0
     base = os.path.basename(src_path)
-    name, ext = os.path.splitext(base)
+    name, _ext = os.path.splitext(base)
     w, h = size
     return os.path.join(THUMB_DIR, f"{name}__{mtime}__{w}x{h}.jpg")
 
 @st.cache_data(show_spinner=False)
 def _make_thumbnail(src_path: str, size: Tuple[int, int]) -> str:
-    """
-    Gera thumbnail com crop central para manter proporção fixa.
-    Se Pillow não existir, retorna src_path.
-    """
     if not src_path or not os.path.exists(src_path):
         return ""
-
     dst = _thumb_path_for(src_path, size)
     if dst and os.path.exists(dst):
         return dst
-
     try:
         from PIL import Image, ImageOps  # type: ignore
     except Exception:
-        # Sem pillow: não gera thumb
         return src_path
-
     try:
         im = Image.open(src_path).convert("RGB")
-        # Crop central para proporção size
         thumb = ImageOps.fit(im, size, method=Image.Resampling.LANCZOS, centering=(0.5, 0.5))
         os.makedirs(THUMB_DIR, exist_ok=True)
         thumb.save(dst, format="JPEG", quality=88, optimize=True)
@@ -351,7 +333,6 @@ def render_card_html(row: pd.Series) -> str:
     st_ins = _escape(_safe_str(row["status_inscricoes"]))
 
     img_path = _pick_image_path(row)
-    # thumbnails padronizadas
     if img_path:
         img_path = _make_thumbnail(img_path, THUMB_SIZE)
 
@@ -385,47 +366,39 @@ def render_card_html(row: pd.Series) -> str:
 # =========================
 # Data
 # =========================
-@st.cache_data(show_spinner=False, ttl=5)
+@st.cache_data(show_spinner=False)  # sem ttl: evita “recarregar no meio”
 def carregar_projetos(path: str, sheet: str) -> pd.DataFrame:
     df = pd.read_excel(path, sheet_name=sheet).fillna("")
 
-    # cria colunas esperadas (evita KeyError como 'titulo')
     expected = [
         "id",
-        # novos
         "titulo_curto", "resumo_curto",
         "titulo_expandido", "resumo_expandido", "perfil",
-        # antigos (fallback)
         "titulo", "resumo", "descricao",
-        # metadados
         "tipo", "categoria", "palavras_chave",
         "status_projeto", "status_inscricoes", "periodo", "imagem",
         "coordenador", "laboratorio", "vagas", "requisitos", "carga_horaria", "local",
-        "link_edital", "contato_email", "observacoes"
+        "link_edital", "contato_email", "observacoes",
     ]
     for c in expected:
         if c not in df.columns:
             df[c] = ""
         df[c] = df[c].astype(str).str.strip()
 
-    # Fallbacks robustos (se não existir 'titulo', ele já foi criado acima)
     df["titulo_curto"] = df["titulo_curto"].where(df["titulo_curto"] != "", df["titulo"])
     df["resumo_curto"] = df["resumo_curto"].where(df["resumo_curto"] != "", df["resumo"])
     df["titulo_expandido"] = df["titulo_expandido"].where(df["titulo_expandido"] != "", df["titulo"])
-
-    # resumo_expandido: novo -> descricao -> resumo
     df["resumo_expandido"] = df["resumo_expandido"].where(
         df["resumo_expandido"] != "",
         df["descricao"].where(df["descricao"] != "", df["resumo"])
     )
 
-    # Remove linhas sem título curto
     df = df[df["titulo_curto"] != ""].copy()
 
-    # Garantir id
     df["id"] = df["id"].where(df["id"] != "", None)
     df["id"] = df["id"].fillna(pd.Series([f"p_{i+1:04d}" for i in range(len(df))], index=df.index))
 
+    df["_id_norm"] = df["id"].map(_normalize_id)
     return df
 
 def aplicar_busca(df: pd.DataFrame, q: str) -> pd.DataFrame:
@@ -461,17 +434,38 @@ def kpis(df: pd.DataFrame) -> dict:
 # Modal
 # =========================
 def close_modal():
+    # NÃO mexe em query params para evitar rerun/fechar dialog no 1.53
     st.session_state["open_id"] = ""
+
+def _find_row_by_id(df_all: pd.DataFrame, any_id: str) -> Optional[pd.Series]:
+    target = _normalize_id(any_id)
+    if not target:
+        return None
+
+    hit = df_all[df_all["_id_norm"] == target]
+    if len(hit) == 1:
+        return hit.iloc[0]
+
+    hit2 = df_all[df_all["_id_norm"].str.contains(target, na=False)]
+    if len(hit2) == 1:
+        return hit2.iloc[0]
+
+    return None
 
 def abrir_modal_projeto(row: pd.Series):
     titulo_modal = _safe_str(row.get("titulo_expandido", "")) or _safe_str(row.get("titulo_curto", "")) or "Detalhes"
-
     img_path = _pick_image_path(row)
-    # Para o modal pode usar a original (ou a thumb, tanto faz)
+    proj_id = _safe_str(row.get("id", ""))
+
     @st.dialog(titulo_modal, width="large")
     def _modal():
+        # ✅ bytes (evita /media 404 em casos de reexecução)
         if img_path and os.path.exists(img_path):
-            st.image(img_path, use_container_width=True)
+            try:
+                with open(img_path, "rb") as f:
+                    st.image(f.read(), use_container_width=True)
+            except Exception:
+                pass
 
         categoria = _safe_str(row["categoria"]) or "Sem categoria"
         tipo = _safe_str(row["tipo"])
@@ -492,6 +486,9 @@ def abrir_modal_projeto(row: pd.Series):
         </div>
         """
         st.markdown(badges_html, unsafe_allow_html=True)
+
+        if proj_id:
+            st.caption(f"Link direto: ?id={html_lib.escape(proj_id)}")
 
         tit_exp = _safe_str(row.get("titulo_expandido", ""))
         if tit_exp:
@@ -552,7 +549,7 @@ if not os.path.exists(ARQ_EXCEL):
 
 df = carregar_projetos(ARQ_EXCEL, ABA)
 
-# Session defaults
+# Session defaults (ANTES de criar widgets)
 if "open_id" not in st.session_state:
     st.session_state["open_id"] = ""
 
@@ -565,6 +562,12 @@ if "f_status_proj" not in st.session_state:
 if "f_status_insc" not in st.session_state:
     st.session_state["f_status_insc"] = "Abertas"
 
+# Deep link (somente leitura)
+url_id = _qp_get_one("id").strip()
+if url_id and st.session_state["open_id"] != url_id:
+    st.session_state["open_id"] = url_id
+
+# ===== UI =====
 st.markdown('<div class="ribbon"></div>', unsafe_allow_html=True)
 
 hl, hr = st.columns([4, 1])
@@ -647,7 +650,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-# Categorias com pills (não esmagam texto)
+# Categorias com pills
 cat_counts = counts_por_categoria(df_base)
 total = len(df_base)
 cats_sorted = sorted(cat_counts.items(), key=lambda x: (-x[1], x[0]))
@@ -687,21 +690,11 @@ if len(df_f) == 0:
     st.info("Nenhum projeto encontrado com os filtros atuais.")
     st.stop()
 
-# Modal aberto por open_id
-open_id = st.session_state.get("open_id", "")
-if open_id:
-    hit = df_f[df_f["id"] == open_id]
-    if len(hit) == 1:
-        abrir_modal_projeto(hit.iloc[0])
-    else:
-        close_modal()
-
 # Grid de cards
 cols = st.columns(GRID_COLS, gap="large")
 for idx, (_, row) in enumerate(df_f.iterrows()):
     with cols[idx % GRID_COLS]:
         proj_id = _safe_str(row["id"]) or f"row_{idx}"
-
         st.markdown(render_card_html(row), unsafe_allow_html=True)
 
         b1, b2, b3 = st.columns([1, 1, 1])
@@ -709,5 +702,19 @@ for idx, (_, row) in enumerate(df_f.iterrows()):
             clicked = st.button("Abrir", key=f"open_{proj_id}", use_container_width=True)
 
         if clicked:
+            # NADA de query_params aqui (evita “rerun extra” que fecha dialog)
             st.session_state["open_id"] = proj_id
             st.rerun()
+
+# =========================
+# ✅ ABRIR MODAL POR ÚLTIMO (fim do script)
+# =========================
+open_id = st.session_state.get("open_id", "")
+if open_id:
+    hit_row = _find_row_by_id(df, open_id)
+    if hit_row is not None:
+        abrir_modal_projeto(hit_row)
+    else:
+        # se id não existe, só não abre
+        st.session_state["open_id"] = ""
+        st.warning(f"Projeto id='{open_id}' não encontrado.")
