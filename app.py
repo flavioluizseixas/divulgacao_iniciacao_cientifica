@@ -51,6 +51,23 @@ GRID_COLS = 3
 THUMB_SIZE = (1200, 675)  # (w, h)
 
 # =========================
+# ✅ Compat: st.image(use_container_width=...) nem sempre existe
+# =========================
+def st_image_full(image, *, width_fallback: Optional[int] = None, **kwargs):
+    """
+    Tenta usar use_container_width=True quando disponível; caso contrário,
+    cai para st.image sem esse parâmetro (evita TypeError).
+    """
+    try:
+        st.image(image, width='stretch', **kwargs)
+    except TypeError:
+        if width_fallback is not None and "width" not in kwargs:
+            st.image(image, width=width_fallback, **kwargs)
+        else:
+            st.image(image, **kwargs)
+
+
+# =========================
 # CSS
 # =========================
 st.markdown(
@@ -344,7 +361,10 @@ def render_card_html(row: pd.Series) -> str:
     if img_src:
         img_html = f'<div class="card-img"><img src="{img_src}" alt=""/></div>'
     else:
-        img_html = '<div class="card-img" style="display:flex;align-items:center;justify-content:center;color:rgba(0,0,0,0.55);font-weight:900;">Sem imagem</div>'
+        img_html = (
+            '<div class="card-img" style="display:flex;align-items:center;justify-content:center;'
+            'color:rgba(0,0,0,0.55);font-weight:900;">Sem imagem</div>'
+        )
 
     return f"""
     <div class="cardwrap">
@@ -463,7 +483,7 @@ def abrir_modal_projeto(row: pd.Series):
         if img_path and os.path.exists(img_path):
             try:
                 with open(img_path, "rb") as f:
-                    st.image(f.read(), use_container_width=True)
+                    st_image_full(f.read(), width_fallback=900)
             except Exception:
                 pass
 
@@ -523,10 +543,10 @@ def abrir_modal_projeto(row: pd.Series):
 
         link = _safe_str(row.get("link_edital", ""))
         if link:
-            st.link_button("📄 Edital / Inscrição", link, use_container_width=True)
+            st.link_button("📄 Edital / Inscrição", link, width='stretch')
 
         st.divider()
-        if st.button("✖ Fechar", use_container_width=True):
+        if st.button("✖ Fechar", width='stretch'):
             close_modal()
             st.rerun()
 
@@ -585,7 +605,8 @@ with hl:
     )
 with hr:
     if os.path.exists(LOGO_PATH):
-        st.image(LOGO_PATH, use_container_width=True)
+        # ✅ evita TypeError em ambientes sem use_container_width
+        st_image_full(LOGO_PATH, width_fallback=200)
     else:
         st.caption("Logo opcional: `assets/uff_proex_logo.png`.")
 
@@ -699,7 +720,7 @@ for idx, (_, row) in enumerate(df_f.iterrows()):
 
         b1, b2, b3 = st.columns([1, 1, 1])
         with b2:
-            clicked = st.button("Abrir", key=f"open_{proj_id}", use_container_width=True)
+            clicked = st.button("Abrir", key=f"open_{proj_id}", width='stretch')
 
         if clicked:
             # NADA de query_params aqui (evita “rerun extra” que fecha dialog)
